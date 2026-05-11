@@ -1,0 +1,167 @@
+name: Build Unsigned IPA (iOS 26 / Liquid Glass)
+ 
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+ 
+jobs:
+  build:
+    name: Build MeloNX Unsigned IPA
+    # ✅ macos-26 = Apple Silicon + Xcode 26 (hỗ trợ Liquid Glass & iOS 26 SDK)
+    runs-on: macos-26
+ 
+    steps:
+      # ── 1. Checkout source code ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+ 
+      # ── 2. Xác nhận Xcode 26 đang được dùng ─────────────────────────────
+      - name: Verify Xcode version
+        run: |
+          xcodebuild -version
+          # Nếu muốn pin version cụ thể (ví dụ 26.2), bỏ comment dòng dưới:
+          # sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+ 
+      # ── 3. Cài .NET SDK (.NET 10 cho Xcode 26 / C# Ryujinx core) ─────────
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+ 
+      # ── 4. Cache NuGet packages ──────────────────────────────────────────
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+ 
+      # ── 5. Cache DerivedData ─────────────────────────────────────────────
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-derived-${{ hashFiles('**/*.xcworkspace', '**/*.xcodeproj', '**/*.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-derived-
+ 
+      # ── 6. Chạy compile script gốc của MeloNX ────────────────────────────
+      # Script này build các .NET libs (ARMeilleure, Ryujinx core, MoltenVK...)
+      - name: Run MeloNX compile script
+        run: |
+          SCRIPT=""
+          if   [ -f ".compile/compile.sh" ]; then SCRIPT=".compile/compile.sh"
+          elif [ -f "compile.sh" ];           then SCRIPT="compile.sh"
+          fi
+ 
+          if [ -n "$SCRIPT" ]; then
+            echo "▶ Running $SCRIPT"
+            chmod +x "$SCRIPT"
+            bash "$SCRIPT"
+          else
+            echo "ℹ No compile.sh found — relying on Xcode build only"
+          fi
+ 
+      # ── 7. Phát hiện workspace và scheme ────────────────────────────────
+      - name: Detect workspace and scheme
+        id: detect
+        run: |
+          WORKSPACE=$(find . -maxdepth 4 -name "*.xcworkspace" \
+            ! -path "*/DerivedData/*" ! -path "*/.build/*" | head -1)
+ 
+          if [ -z "$WORKSPACE" ]; then
+            echo "❌ Không tìm thấy .xcworkspace!"
+            exit 1
+          fi
+          echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+          echo "✅ Workspace: $WORKSPACE"
+ 
+          SCHEMES=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | \
+            awk '/Schemes:/,0' | tail -n +2 | sed 's/^[[:space:]]*//' | grep -v '^$')
+          echo "Available schemes:"
+          echo "$SCHEMES"
+ 
+          # Ưu tiên scheme tên "MeloNX", fallback về scheme đầu tiên
+          SCHEME=$(echo "$SCHEMES" | grep -i "MeloNX" | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
+ 
+          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
+          echo "✅ Scheme: $SCHEME"
+ 
+      # ── 8. Build unsigned archive ────────────────────────────────────────
+      - name: Build unsigned archive
+        run: |
+          set -o pipefail
+ 
+          xcodebuild \
+            -workspace "${{ steps.detect.outputs.workspace }}" \
+            -scheme    "${{ steps.detect.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            clean archive \
+          | xcbeautify || {
+            echo ""
+            echo "❌ Build thất bại! Raw log (80 dòng cuối):"
+            xcodebuild \
+              -workspace "${{ steps.detect.outputs.workspace }}" \
+              -scheme    "${{ steps.detect.outputs.scheme }}" \
+              -configuration Release \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -archivePath "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              DEVELOPMENT_TEAM="" \
+              clean archive 2>&1 | tail -80
+            exit 1
+          }
+ 
+          [ -d "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" ] \
+            && echo "✅ Archive created" \
+            || { echo "❌ Archive missing!"; exit 1; }
+ 
+      # ── 9. Đóng gói thành IPA ─────────────────────────────────────────────
+      - name: Package IPA
+        run: |
+          ARCHIVE="$GITHUB_WORKSPACE/build/MeloNX.xcarchive"
+          PAYLOAD="$GITHUB_WORKSPACE/build/Payload"
+          IPA="$GITHUB_WORKSPACE/build/MeloNX-unsigned.ipa"
+ 
+          mkdir -p "$PAYLOAD"
+ 
+          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "❌ Không tìm thấy .app trong archive!"
+            find "$ARCHIVE" -type d | head -20
+            exit 1
+          fi
+          echo "✅ App: $APP"
+ 
+          cp -R "$APP" "$PAYLOAD/"
+          cd "$GITHUB_WORKSPACE/build"
+          zip -r "MeloNX-unsigned.ipa" "Payload" -x "*.DS_Store"
+ 
+          echo "✅ IPA size: $(du -sh MeloNX-unsigned.ipa | cut -f1)"
+ 
+      # ── 10. Upload artifact ───────────────────────────────────────────────
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeloNX-unsigned-${{ github.sha }}
+          path: ${{ github.workspace }}/build/MeloNX-unsigned.ipa
+          retention-days: 30
