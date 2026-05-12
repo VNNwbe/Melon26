@@ -22,7 +22,6 @@ jobs:
       - name: Verify Xcode version
         run: xcodebuild -version
  
-      # Dung .NET 8 vi project dung net8.0
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -44,58 +43,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-derived-
  
-      # Buoc quan trong: build C# native library truoc
-      - name: Build Ryujinx .NET native libraries
+      # Build Ryujinx C# native library (phai chay truoc Xcode)
+      - name: Build Ryujinx native dylib
         run: |
-          echo "=== Checking compile scripts ==="
-          find . -name "compile.sh" | head -5
+          SCRIPT="distribution/ios/compile.sh"
  
-          # Chay compile.sh neu co
-          SCRIPT=""
-          if   [ -f ".compile/compile.sh" ]; then SCRIPT=".compile/compile.sh"
-          elif [ -f "compile.sh" ];           then SCRIPT="compile.sh"
-          fi
- 
-          if [ -n "$SCRIPT" ]; then
-            echo "Running $SCRIPT"
-            chmod +x "$SCRIPT"
-            bash "$SCRIPT"
-          else
-            echo "No compile.sh — building Ryujinx.Headless.SDL2 manually..."
- 
-            # Tim file .csproj cua Ryujinx.Headless.SDL2
-            CSPROJ=$(find . -name "Ryujinx.Headless.SDL2.csproj" | head -1)
-            if [ -z "$CSPROJ" ]; then
-              echo "ERROR: Khong tim thay Ryujinx.Headless.SDL2.csproj!"
-              find . -name "*.csproj" | head -10
-              exit 1
-            fi
-            echo "Found: $CSPROJ"
- 
-            # Build native dylib cho ios-arm64
-            dotnet publish "$CSPROJ" \
-              -c Release \
-              -r ios-arm64 \
-              --self-contained true \
-              -p:PublishAot=true \
-              || dotnet build "$CSPROJ" \
-                   -c Release \
-                   -r ios-arm64 \
-                   --self-contained true
- 
-            # Kiem tra ket qua
-            echo "=== Built dylibs ==="
-            find . -name "*.dylib" | head -20
-            find . -name "*.framework" | head -10
-          fi
- 
-          # Xac nhan dylib ton tai
-          DYLIB=$(find . -name "Ryujinx.Headless.SDL2.dylib" | head -1)
-          if [ -z "$DYLIB" ]; then
-            echo "ERROR: Ryujinx.Headless.SDL2.dylib chua duoc build!"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "ERROR: Khong tim thay $SCRIPT"
+            find . -name "compile.sh" | head -10
             exit 1
           fi
-          echo "OK: $DYLIB ($(du -sh "$DYLIB" | cut -f1))"
+ 
+          echo "Running $SCRIPT from repo root..."
+          chmod +x "$SCRIPT"
+ 
+          # Chay tu repo root (vi compile.sh dung duong dan tuong doi src/...)
+          bash "$SCRIPT"
+ 
+          # Xac nhan dylib da duoc copy vao dung cho
+          DYLIB="src/MeloNX/MeloNX/Dependencies/Dynamic Libraries/Ryujinx.Headless.SDL2.dylib"
+          if [ ! -f "$DYLIB" ]; then
+            echo "ERROR: Dylib chua duoc copy vao $DYLIB"
+            echo "Tim kiem dylib o noi khac:"
+            find . -name "Ryujinx.Headless.SDL2.dylib" | head -5
+            exit 1
+          fi
+          echo "OK: $(du -sh "$DYLIB" | cut -f1) — $DYLIB"
  
       - name: Detect workspace and scheme
         id: detect
@@ -160,10 +133,8 @@ jobs:
           PAYLOAD="$GITHUB_WORKSPACE/build/Payload"
           mkdir -p "$PAYLOAD"
  
-          # Tim .app trong archive
           APP=$(find "$ARCHIVE" -name "*.app" -not -path "*/dSYMs/*" | head -1)
  
-          # Fallback: tim trong DerivedData
           if [ -z "$APP" ]; then
             echo "Not in archive, searching DerivedData..."
             APP=$(find ~/Library/Developer/Xcode/DerivedData \
@@ -182,8 +153,7 @@ jobs:
           echo "App: $APP (${SIZE_KB}KB)"
  
           if [ "$SIZE_KB" -lt 1000 ]; then
-            echo "ERROR: .app qua nho (${SIZE_KB}KB) — co the thieu dylib!"
-            ls -la "$APP/"
+            echo "ERROR: App qua nho — co the thieu dylib!"
             exit 1
           fi
  
