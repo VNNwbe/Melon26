@@ -23,7 +23,7 @@ final class JoystickView: UIView {
     }
     
     private var joystickSize: CGFloat {
-        dragDiameter * 0.2
+        dragDiameter * 0.6
     }
     
     private var boundarySize: CGFloat {
