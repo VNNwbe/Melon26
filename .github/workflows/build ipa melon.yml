@@ -112,6 +112,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
+            SKIP_INSTALL=NO \
+            INSTALL_PATH="/Applications" \
             clean archive \
           | xcbeautify || {
             echo ""
@@ -127,6 +129,8 @@ jobs:
               CODE_SIGNING_REQUIRED=NO \
               CODE_SIGNING_ALLOWED=NO \
               DEVELOPMENT_TEAM="" \
+              SKIP_INSTALL=NO \
+              INSTALL_PATH="/Applications" \
               clean archive 2>&1 | tail -80
             exit 1
           }
@@ -140,14 +144,17 @@ jobs:
         run: |
           ARCHIVE="$GITHUB_WORKSPACE/build/MeloNX.xcarchive"
           PAYLOAD="$GITHUB_WORKSPACE/build/Payload"
-          IPA="$GITHUB_WORKSPACE/build/MeloNX-unsigned.ipa"
  
           mkdir -p "$PAYLOAD"
  
-          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" | head -1)
+          echo "📂 Cấu trúc archive:"
+          find "$ARCHIVE" -type d | head -30
+ 
+          # Tìm .app ở mọi vị trí trong archive (kể cả khi SKIP_INSTALL=YES)
+          APP=$(find "$ARCHIVE" -name "*.app" -not -path "*/dSYMs/*" | head -1)
+ 
           if [ -z "$APP" ]; then
             echo "❌ Không tìm thấy .app trong archive!"
-            find "$ARCHIVE" -type d | head -20
             exit 1
           fi
           echo "✅ App: $APP"
