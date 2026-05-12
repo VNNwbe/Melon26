@@ -70,14 +70,21 @@ jobs:
  
           SCHEMES=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | \
             awk '/Schemes:/,0' | tail -n +2 | sed 's/^[[:space:]]*//' | grep -v '^$')
-          echo "Schemes: $SCHEMES"
+          echo "All schemes:"
+          echo "$SCHEMES"
  
-          SCHEME=$(echo "$SCHEMES" | grep -i "MeloNX" | head -1)
+          # 1. Exact match "MeloNX"
+          SCHEME=$(echo "$SCHEMES" | grep -x "MeloNX" | head -1)
+          # 2. Short name khong co dau cham (com.xxx)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | grep -v '\.' | head -1)
+          # 3. Fallback bat ky scheme nao chua MeloNX
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | head -1)
+          # 4. Fallback scheme dau tien
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
-          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
-          echo "Scheme: $SCHEME"
  
-      # Build va in toan bo log de debug
+          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
+          echo "Selected scheme: $SCHEME"
+ 
       - name: Build unsigned archive
         run: |
           mkdir -p "$GITHUB_WORKSPACE/build"
@@ -101,7 +108,6 @@ jobs:
           echo "--- Archive contents ---"
           find "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" | head -60
  
-      # Upload log de xem chi tiet du thanh cong hay that bai
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -117,9 +123,21 @@ jobs:
  
           mkdir -p "$PAYLOAD"
  
+          # Tim .app trong archive, bo qua dSYMs
           APP=$(find "$ARCHIVE" -name "*.app" -not -path "*/dSYMs/*" | head -1)
+ 
+          # Neu khong co trong archive, tim trong DerivedData (Xcode 26 fallback)
           if [ -z "$APP" ]; then
-            echo "ERROR: No .app found in archive!"
+            echo "Not found in archive, searching DerivedData..."
+            APP=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" \
+              -path "*/Release-iphoneos/*" \
+              -not -path "*/dSYMs/*" \
+              -not -name "*.appex" \
+              2>/dev/null | head -1)
+          fi
+ 
+          if [ -z "$APP" ]; then
+            echo "ERROR: No .app found anywhere!"
             exit 1
           fi
           echo "App: $APP"
