@@ -10,31 +10,24 @@ on:
 jobs:
   build:
     name: Build MeloNX Unsigned IPA
-    # ✅ macos-26 = Apple Silicon + Xcode 26 (hỗ trợ Liquid Glass & iOS 26 SDK)
     runs-on: macos-26
  
     steps:
-      # ── 1. Checkout source code ──────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
  
-      # ── 2. Xác nhận Xcode 26 đang được dùng ─────────────────────────────
       - name: Verify Xcode version
-        run: |
-          xcodebuild -version
-          # Nếu muốn pin version cụ thể (ví dụ 26.2), bỏ comment dòng dưới:
-          # sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+        run: xcodebuild -version
  
-      # ── 3. Cài .NET SDK (.NET 10 cho Xcode 26 / C# Ryujinx core) ─────────
+      # Dung .NET 8 vi project dung net8.0
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '8.0.x'
  
-      # ── 4. Cache NuGet packages ──────────────────────────────────────────
       - name: Cache NuGet
         uses: actions/cache@v4
         with:
@@ -43,7 +36,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
  
-      # ── 5. Cache DerivedData ─────────────────────────────────────────────
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
@@ -52,53 +44,88 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-derived-
  
-      # ── 6. Chạy compile script gốc của MeloNX ────────────────────────────
-      # Script này build các .NET libs (ARMeilleure, Ryujinx core, MoltenVK...)
-      - name: Run MeloNX compile script
+      # Buoc quan trong: build C# native library truoc
+      - name: Build Ryujinx .NET native libraries
         run: |
+          echo "=== Checking compile scripts ==="
+          find . -name "compile.sh" | head -5
+ 
+          # Chay compile.sh neu co
           SCRIPT=""
           if   [ -f ".compile/compile.sh" ]; then SCRIPT=".compile/compile.sh"
           elif [ -f "compile.sh" ];           then SCRIPT="compile.sh"
           fi
  
           if [ -n "$SCRIPT" ]; then
-            echo "▶ Running $SCRIPT"
+            echo "Running $SCRIPT"
             chmod +x "$SCRIPT"
             bash "$SCRIPT"
           else
-            echo "ℹ No compile.sh found — relying on Xcode build only"
+            echo "No compile.sh — building Ryujinx.Headless.SDL2 manually..."
+ 
+            # Tim file .csproj cua Ryujinx.Headless.SDL2
+            CSPROJ=$(find . -name "Ryujinx.Headless.SDL2.csproj" | head -1)
+            if [ -z "$CSPROJ" ]; then
+              echo "ERROR: Khong tim thay Ryujinx.Headless.SDL2.csproj!"
+              find . -name "*.csproj" | head -10
+              exit 1
+            fi
+            echo "Found: $CSPROJ"
+ 
+            # Build native dylib cho ios-arm64
+            dotnet publish "$CSPROJ" \
+              -c Release \
+              -r ios-arm64 \
+              --self-contained true \
+              -p:PublishAot=true \
+              || dotnet build "$CSPROJ" \
+                   -c Release \
+                   -r ios-arm64 \
+                   --self-contained true
+ 
+            # Kiem tra ket qua
+            echo "=== Built dylibs ==="
+            find . -name "*.dylib" | head -20
+            find . -name "*.framework" | head -10
           fi
  
-      # ── 7. Phát hiện workspace và scheme ────────────────────────────────
+          # Xac nhan dylib ton tai
+          DYLIB=$(find . -name "Ryujinx.Headless.SDL2.dylib" | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: Ryujinx.Headless.SDL2.dylib chua duoc build!"
+            exit 1
+          fi
+          echo "OK: $DYLIB ($(du -sh "$DYLIB" | cut -f1))"
+ 
       - name: Detect workspace and scheme
         id: detect
         run: |
           WORKSPACE=$(find . -maxdepth 4 -name "*.xcworkspace" \
             ! -path "*/DerivedData/*" ! -path "*/.build/*" | head -1)
- 
           if [ -z "$WORKSPACE" ]; then
-            echo "❌ Không tìm thấy .xcworkspace!"
+            echo "ERROR: No .xcworkspace found!"
             exit 1
           fi
           echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
-          echo "✅ Workspace: $WORKSPACE"
+          echo "Workspace: $WORKSPACE"
  
           SCHEMES=$(xcodebuild -workspace "$WORKSPACE" -list 2>/dev/null | \
             awk '/Schemes:/,0' | tail -n +2 | sed 's/^[[:space:]]*//' | grep -v '^$')
-          echo "Available schemes:"
+          echo "All schemes:"
           echo "$SCHEMES"
  
-          # Ưu tiên scheme tên "MeloNX", fallback về scheme đầu tiên
-          SCHEME=$(echo "$SCHEMES" | grep -i "MeloNX" | head -1)
+          # Exact match "MeloNX" truoc
+          SCHEME=$(echo "$SCHEMES" | grep -x "MeloNX" | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | grep -v '\.' | head -1)
+          [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | head -1)
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
  
           echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
-          echo "✅ Scheme: $SCHEME"
+          echo "Selected scheme: [$SCHEME]"
  
-      # ── 8. Build unsigned archive ────────────────────────────────────────
       - name: Build unsigned archive
         run: |
-          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build"
  
           xcodebuild \
             -workspace "${{ steps.detect.outputs.workspace }}" \
@@ -112,53 +139,59 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
-            clean archive \
-          | xcbeautify || {
-            echo ""
-            echo "❌ Build thất bại! Raw log (80 dòng cuối):"
-            xcodebuild \
-              -workspace "${{ steps.detect.outputs.workspace }}" \
-              -scheme    "${{ steps.detect.outputs.scheme }}" \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination "generic/platform=iOS" \
-              -archivePath "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              DEVELOPMENT_TEAM="" \
-              clean archive 2>&1 | tail -80
-            exit 1
-          }
+            SKIP_INSTALL=NO \
+            INSTALL_PATH="/Applications" \
+            clean archive 2>&1 | tee "$GITHUB_WORKSPACE/build/xcodebuild.log"
  
-          [ -d "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" ] \
-            && echo "✅ Archive created" \
-            || { echo "❌ Archive missing!"; exit 1; }
+          echo "--- Archive contents ---"
+          find "$GITHUB_WORKSPACE/build/MeloNX.xcarchive" | head -60
  
-      # ── 9. Đóng gói thành IPA ─────────────────────────────────────────────
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log-${{ github.sha }}
+          path: ${{ github.workspace }}/build/xcodebuild.log
+          retention-days: 7
+ 
       - name: Package IPA
         run: |
           ARCHIVE="$GITHUB_WORKSPACE/build/MeloNX.xcarchive"
           PAYLOAD="$GITHUB_WORKSPACE/build/Payload"
-          IPA="$GITHUB_WORKSPACE/build/MeloNX-unsigned.ipa"
- 
           mkdir -p "$PAYLOAD"
  
-          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" | head -1)
+          # Tim .app trong archive
+          APP=$(find "$ARCHIVE" -name "*.app" -not -path "*/dSYMs/*" | head -1)
+ 
+          # Fallback: tim trong DerivedData
           if [ -z "$APP" ]; then
-            echo "❌ Không tìm thấy .app trong archive!"
-            find "$ARCHIVE" -type d | head -20
+            echo "Not in archive, searching DerivedData..."
+            APP=$(find ~/Library/Developer/Xcode/DerivedData \
+              -name "MeloNX.app" \
+              -path "*/Release-iphoneos/*" \
+              -not -path "*/dSYMs/*" \
+              2>/dev/null | head -1)
+          fi
+ 
+          if [ -z "$APP" ]; then
+            echo "ERROR: No .app found!"
             exit 1
           fi
-          echo "✅ App: $APP"
+ 
+          SIZE_KB=$(du -sk "$APP" | cut -f1)
+          echo "App: $APP (${SIZE_KB}KB)"
+ 
+          if [ "$SIZE_KB" -lt 1000 ]; then
+            echo "ERROR: .app qua nho (${SIZE_KB}KB) — co the thieu dylib!"
+            ls -la "$APP/"
+            exit 1
+          fi
  
           cp -R "$APP" "$PAYLOAD/"
           cd "$GITHUB_WORKSPACE/build"
           zip -r "MeloNX-unsigned.ipa" "Payload" -x "*.DS_Store"
+          echo "IPA size: $(du -sh MeloNX-unsigned.ipa | cut -f1)"
  
-          echo "✅ IPA size: $(du -sh MeloNX-unsigned.ipa | cut -f1)"
- 
-      # ── 10. Upload artifact ───────────────────────────────────────────────
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
