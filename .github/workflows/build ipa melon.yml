@@ -22,10 +22,11 @@ jobs:
       - name: Verify Xcode version
         run: xcodebuild -version
  
+      # Dung .NET 8 vi project dung net8.0
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '8.0.x'
  
       - name: Cache NuGet
         uses: actions/cache@v4
@@ -43,18 +44,58 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-derived-
  
-      - name: Run compile script
+      # Buoc quan trong: build C# native library truoc
+      - name: Build Ryujinx .NET native libraries
         run: |
+          echo "=== Checking compile scripts ==="
+          find . -name "compile.sh" | head -5
+ 
+          # Chay compile.sh neu co
           SCRIPT=""
           if   [ -f ".compile/compile.sh" ]; then SCRIPT=".compile/compile.sh"
           elif [ -f "compile.sh" ];           then SCRIPT="compile.sh"
           fi
+ 
           if [ -n "$SCRIPT" ]; then
+            echo "Running $SCRIPT"
             chmod +x "$SCRIPT"
             bash "$SCRIPT"
           else
-            echo "No compile.sh found"
+            echo "No compile.sh — building Ryujinx.Headless.SDL2 manually..."
+ 
+            # Tim file .csproj cua Ryujinx.Headless.SDL2
+            CSPROJ=$(find . -name "Ryujinx.Headless.SDL2.csproj" | head -1)
+            if [ -z "$CSPROJ" ]; then
+              echo "ERROR: Khong tim thay Ryujinx.Headless.SDL2.csproj!"
+              find . -name "*.csproj" | head -10
+              exit 1
+            fi
+            echo "Found: $CSPROJ"
+ 
+            # Build native dylib cho ios-arm64
+            dotnet publish "$CSPROJ" \
+              -c Release \
+              -r ios-arm64 \
+              --self-contained true \
+              -p:PublishAot=true \
+              || dotnet build "$CSPROJ" \
+                   -c Release \
+                   -r ios-arm64 \
+                   --self-contained true
+ 
+            # Kiem tra ket qua
+            echo "=== Built dylibs ==="
+            find . -name "*.dylib" | head -20
+            find . -name "*.framework" | head -10
           fi
+ 
+          # Xac nhan dylib ton tai
+          DYLIB=$(find . -name "Ryujinx.Headless.SDL2.dylib" | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: Ryujinx.Headless.SDL2.dylib chua duoc build!"
+            exit 1
+          fi
+          echo "OK: $DYLIB ($(du -sh "$DYLIB" | cut -f1))"
  
       - name: Detect workspace and scheme
         id: detect
@@ -73,17 +114,14 @@ jobs:
           echo "All schemes:"
           echo "$SCHEMES"
  
-          # 1. Exact match "MeloNX"
+          # Exact match "MeloNX" truoc
           SCHEME=$(echo "$SCHEMES" | grep -x "MeloNX" | head -1)
-          # 2. Short name khong co dau cham (com.xxx)
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | grep -v '\.' | head -1)
-          # 3. Fallback bat ky scheme nao chua MeloNX
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | grep -i "melonx" | head -1)
-          # 4. Fallback scheme dau tien
           [ -z "$SCHEME" ] && SCHEME=$(echo "$SCHEMES" | head -1)
  
           echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
-          echo "Selected scheme: $SCHEME"
+          echo "Selected scheme: [$SCHEME]"
  
       - name: Build unsigned archive
         run: |
@@ -120,27 +158,34 @@ jobs:
         run: |
           ARCHIVE="$GITHUB_WORKSPACE/build/MeloNX.xcarchive"
           PAYLOAD="$GITHUB_WORKSPACE/build/Payload"
- 
           mkdir -p "$PAYLOAD"
  
-          # Tim .app trong archive, bo qua dSYMs
+          # Tim .app trong archive
           APP=$(find "$ARCHIVE" -name "*.app" -not -path "*/dSYMs/*" | head -1)
  
-          # Neu khong co trong archive, tim trong DerivedData (Xcode 26 fallback)
+          # Fallback: tim trong DerivedData
           if [ -z "$APP" ]; then
-            echo "Not found in archive, searching DerivedData..."
-            APP=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" \
+            echo "Not in archive, searching DerivedData..."
+            APP=$(find ~/Library/Developer/Xcode/DerivedData \
+              -name "MeloNX.app" \
               -path "*/Release-iphoneos/*" \
               -not -path "*/dSYMs/*" \
-              -not -name "*.appex" \
               2>/dev/null | head -1)
           fi
  
           if [ -z "$APP" ]; then
-            echo "ERROR: No .app found anywhere!"
+            echo "ERROR: No .app found!"
             exit 1
           fi
-          echo "App: $APP"
+ 
+          SIZE_KB=$(du -sk "$APP" | cut -f1)
+          echo "App: $APP (${SIZE_KB}KB)"
+ 
+          if [ "$SIZE_KB" -lt 1000 ]; then
+            echo "ERROR: .app qua nho (${SIZE_KB}KB) — co the thieu dylib!"
+            ls -la "$APP/"
+            exit 1
+          fi
  
           cp -R "$APP" "$PAYLOAD/"
           cd "$GITHUB_WORKSPACE/build"
